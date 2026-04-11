@@ -47,7 +47,6 @@ use codex_protocol::config_types::WebSearchToolConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::ReadOnlyAccess;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path::normalize_for_path_comparison;
@@ -639,9 +638,10 @@ impl ConfigToml {
                     network_access,
                     exclude_tmpdir_env_var,
                     exclude_slash_tmp,
+                    read_only_access,
                 }) => SandboxPolicy::WorkspaceWrite {
                     writable_roots: writable_roots.clone(),
-                    read_only_access: ReadOnlyAccess::FullAccess,
+                    read_only_access: read_only_access.clone(),
                     network_access: *network_access,
                     exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
                     exclude_slash_tmp: *exclude_slash_tmp,
@@ -827,5 +827,127 @@ pub fn validate_oss_provider(provider: &str) -> std::io::Result<()> {
                 "Invalid OSS provider '{provider}'. Must be one of: {LMSTUDIO_OSS_PROVIDER_ID}, {OLLAMA_OSS_PROVIDER_ID}"
             ),
         )),
+    }
+}
+
+#[cfg(test)]
+mod derive_sandbox_policy_tests {
+    use super::*;
+    use codex_protocol::protocol::ReadOnlyAccess;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+
+    /// Regression test for the hard-coded `read_only_access: FullAccess`
+    /// in the workspace-write config path. Before this fix, setting
+    /// `read_only_access` under `[sandbox_workspace_write]` in config.toml
+    /// was silently discarded — the resolved SandboxPolicy always had
+    /// FullAccess regardless of what the user wrote.
+    ///
+    /// The test constructs a ConfigToml with a `Restricted` read_only_access
+    /// and asserts the same variant survives `derive_sandbox_policy`.
+    #[tokio::test]
+    async fn derive_sandbox_policy_propagates_restricted_read_only_access() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let readable_root = tmp.path().join("allowed");
+        std::fs::create_dir_all(&readable_root).expect("mkdir");
+        let readable_root_abs =
+            AbsolutePathBuf::from_absolute_path(&readable_root.canonicalize().unwrap())
+                .expect("readable root is absolute");
+
+        let toml_text = format!(
+            r#"
+                [sandbox_workspace_write]
+                writable_roots = []
+                network_access = false
+
+                [sandbox_workspace_write.read_only_access]
+                type = "restricted"
+                include_platform_defaults = true
+                readable_roots = [{path:?}]
+            "#,
+            path = readable_root.display().to_string(),
+        );
+        let cfg: ConfigToml = toml::from_str(&toml_text).expect("parse ConfigToml");
+
+        let policy = cfg
+            .derive_sandbox_policy(
+                Some(SandboxMode::WorkspaceWrite),
+                None,
+                WindowsSandboxLevel::Disabled,
+                None,
+                None,
+            )
+            .await;
+
+        // On Windows, workspace-write is downgraded to read-only when the
+        // experimental sandbox is disabled; the field propagation is still
+        // exercised on Linux and macOS.
+        if cfg!(target_os = "windows") {
+            return;
+        }
+
+        match policy {
+            SandboxPolicy::WorkspaceWrite {
+                read_only_access:
+                    ReadOnlyAccess::Restricted {
+                        include_platform_defaults,
+                        readable_roots,
+                    },
+                ..
+            } => {
+                assert!(
+                    include_platform_defaults,
+                    "include_platform_defaults=true should round-trip",
+                );
+                assert!(
+                    readable_roots.contains(&readable_root_abs),
+                    "expected readable root {:?} in resolved policy, got {:?}",
+                    readable_root_abs,
+                    readable_roots,
+                );
+            }
+            SandboxPolicy::WorkspaceWrite {
+                read_only_access: ReadOnlyAccess::FullAccess,
+                ..
+            } => panic!(
+                "REGRESSION: config loader dropped read_only_access. \
+                 Expected Restricted, got FullAccess — the hard-coded value \
+                 is back."
+            ),
+            other => panic!("expected WorkspaceWrite policy, got {other:?}"),
+        }
+    }
+
+    /// Sanity: when the user does NOT set read_only_access in their TOML,
+    /// the resolved policy falls back to FullAccess (historical behavior).
+    #[tokio::test]
+    async fn derive_sandbox_policy_defaults_read_only_access_to_full_access() {
+        let toml_text = r#"
+            [sandbox_workspace_write]
+            writable_roots = []
+            network_access = false
+        "#;
+        let cfg: ConfigToml = toml::from_str(toml_text).expect("parse ConfigToml");
+
+        let policy = cfg
+            .derive_sandbox_policy(
+                Some(SandboxMode::WorkspaceWrite),
+                None,
+                WindowsSandboxLevel::Disabled,
+                None,
+                None,
+            )
+            .await;
+
+        if cfg!(target_os = "windows") {
+            return;
+        }
+
+        match policy {
+            SandboxPolicy::WorkspaceWrite {
+                read_only_access: ReadOnlyAccess::FullAccess,
+                ..
+            } => {}
+            other => panic!("expected WorkspaceWrite with FullAccess default, got {other:?}"),
+        }
     }
 }

@@ -682,10 +682,28 @@ pub struct SandboxWorkspaceWrite {
     pub exclude_tmpdir_env_var: bool,
     #[serde(default)]
     pub exclude_slash_tmp: bool,
+    /// Controls which filesystem entries the agent may read inside a
+    /// workspace-write sandbox. Defaults to `FullAccess` (reads allowed
+    /// anywhere), preserving historical behavior. Set to a `restricted`
+    /// variant in config.toml to confine reads to the workspace, the
+    /// optional platform defaults, and any explicitly listed roots:
+    ///
+    /// ```toml
+    /// [sandbox_workspace_write.read_only_access]
+    /// type = "restricted"
+    /// include_platform_defaults = true
+    /// readable_roots = ["/opt/tools"]
+    /// ```
+    #[serde(default)]
+    pub read_only_access: codex_protocol::protocol::ReadOnlyAccess,
 }
 
 impl From<SandboxWorkspaceWrite> for codex_app_server_protocol::SandboxSettings {
     fn from(sandbox_workspace_write: SandboxWorkspaceWrite) -> Self {
+        // The v1 app-server `SandboxSettings` does not (yet) carry
+        // `read_only_access`, so that field is intentionally dropped at this
+        // boundary. The direct config-to-SandboxPolicy path used by
+        // `codex exec` still respects it.
         Self {
             writable_roots: sandbox_workspace_write.writable_roots,
             network_access: Some(sandbox_workspace_write.network_access),
