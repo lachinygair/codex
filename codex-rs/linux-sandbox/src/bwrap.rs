@@ -31,21 +31,10 @@ use globset::GlobBuilder;
 use globset::GlobSet;
 use globset::GlobSetBuilder;
 
-/// Linux "platform defaults" that keep common system binaries and dynamic
-/// libraries readable when `ReadOnlyAccess::Restricted` requests them.
-///
-/// These are intentionally system-level paths only (plus Nix store roots) so
-/// `include_platform_defaults` does not silently widen access to user data.
-const LINUX_PLATFORM_DEFAULT_READ_ROOTS: &[&str] = &[
-    "/bin",
-    "/sbin",
-    "/usr",
-    "/etc",
-    "/lib",
-    "/lib64",
-    "/nix/store",
-    "/run/current-system/sw",
-];
+// The Linux platform default read-only roots live in `crate::platform_defaults`
+// so both the bubblewrap path (below) and the legacy-Landlock path
+// (in `crate::landlock`) can share a single definition.
+use crate::platform_defaults::LINUX_PLATFORM_DEFAULT_READ_ROOTS;
 
 const MAX_UNREADABLE_GLOB_MATCHES: usize = 8192;
 

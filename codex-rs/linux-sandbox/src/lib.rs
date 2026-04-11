@@ -12,6 +12,8 @@ mod launcher;
 #[cfg(target_os = "linux")]
 mod linux_run_main;
 #[cfg(target_os = "linux")]
+mod platform_defaults;
+#[cfg(target_os = "linux")]
 mod proxy_routing;
 #[cfg(target_os = "linux")]
 mod vendored_bwrap;

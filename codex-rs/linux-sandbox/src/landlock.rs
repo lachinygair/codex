@@ -68,22 +68,58 @@ pub(crate) fn apply_sandbox_policy_to_current_thread(
     }
 
     if apply_landlock_fs && !sandbox_policy.has_full_disk_write_access() {
-        if !sandbox_policy.has_full_disk_read_access() {
-            return Err(CodexErr::UnsupportedOperation(
-                "Restricted read-only access is not supported by the legacy Linux Landlock filesystem backend."
-                    .to_string(),
-            ));
-        }
-
-        let writable_roots = sandbox_policy
+        let writable_roots: Vec<AbsolutePathBuf> = sandbox_policy
             .get_writable_roots_with_cwd(cwd)
             .into_iter()
             .map(|writable_root| writable_root.root)
             .collect();
-        install_filesystem_landlock_rules_on_current_thread(writable_roots)?;
+
+        // If the policy restricts reads, build the explicit list of readable
+        // roots that the Landlock ruleset should allow. An empty list tells
+        // `install_filesystem_landlock_rules_on_current_thread` to fall back
+        // to its historical behavior (allow reads on `/`).
+        let readable_roots: Vec<AbsolutePathBuf> =
+            if sandbox_policy.has_full_disk_read_access() {
+                Vec::new()
+            } else {
+                build_restricted_readable_roots(sandbox_policy, cwd)
+            };
+
+        install_filesystem_landlock_rules_on_current_thread(readable_roots, writable_roots)?;
     }
 
     Ok(())
+}
+
+/// Collect the list of paths that should be readable under a restricted
+/// read-only Landlock ruleset. Combines user-configured readable roots with
+/// the Linux platform defaults (when requested) and drops any paths that do
+/// not exist on disk, because Landlock rejects rules on missing paths.
+fn build_restricted_readable_roots(
+    sandbox_policy: &SandboxPolicy,
+    cwd: &Path,
+) -> Vec<AbsolutePathBuf> {
+    let mut roots = sandbox_policy.get_readable_roots_with_cwd(cwd);
+
+    if sandbox_policy.include_platform_defaults() {
+        for default in crate::platform_defaults::existing_platform_default_read_roots() {
+            if let Ok(abs) = AbsolutePathBuf::from_absolute_path(&default) {
+                roots.push(abs);
+            }
+        }
+    }
+
+    // Deduplicate while preserving order.
+    let mut seen = std::collections::BTreeSet::new();
+    roots.retain(|r| seen.insert(r.as_path().to_path_buf()));
+
+    // Drop any path that does not exist on disk — Landlock's
+    // `path_beneath_rules` treats missing paths as an error and fails the
+    // whole ruleset.
+    roots
+        .into_iter()
+        .filter(|r| r.as_path().exists())
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,16 +160,23 @@ fn set_no_new_privs() -> Result<()> {
     Ok(())
 }
 
-/// Installs Landlock file-system rules on the current thread allowing read
-/// access to the entire file-system while restricting write access to
-/// `/dev/null` and the provided list of `writable_roots`.
+/// Installs Landlock file-system rules on the current thread.
+///
+/// * When `readable_roots` is **empty**, this installs the historical
+///   behavior: read access to the entire filesystem (`/`), plus write access
+///   to `/dev/null` and each path in `writable_roots`. This path preserves
+///   backwards compatibility with callers that pass an unrestricted
+///   (`ReadOnlyAccess::FullAccess`) policy.
+///
+/// * When `readable_roots` is **non-empty**, this installs a restricted
+///   read ruleset: read access is only granted on the listed paths
+///   (plus `/dev/null` and each writable root, since `AccessFs::from_all`
+///   includes read). All other reads are denied by Landlock.
 ///
 /// # Errors
 /// Returns [`CodexErr::Sandbox`] variants when the ruleset fails to apply.
-///
-/// Note: this is currently unused because filesystem sandboxing is performed
-/// via bubblewrap. It is kept for reference and potential fallback use.
 fn install_filesystem_landlock_rules_on_current_thread(
+    readable_roots: Vec<AbsolutePathBuf>,
     writable_roots: Vec<AbsolutePathBuf>,
 ) -> Result<()> {
     let abi = ABI::V5;
@@ -143,8 +186,20 @@ fn install_filesystem_landlock_rules_on_current_thread(
     let mut ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
         .handle_access(access_rw)?
-        .create()?
-        .add_rules(landlock::path_beneath_rules(&["/"], access_ro))?
+        .create()?;
+
+    if readable_roots.is_empty() {
+        // Historical behavior: blanket read access on `/`.
+        ruleset = ruleset.add_rules(landlock::path_beneath_rules(&["/"], access_ro))?;
+    } else {
+        // Restricted read access: only the explicitly listed roots are
+        // readable. Writable roots are added separately below as `access_rw`
+        // which implicitly grants reads too, so we do not need to duplicate
+        // them here.
+        ruleset = ruleset.add_rules(landlock::path_beneath_rules(&readable_roots, access_ro))?;
+    }
+
+    ruleset = ruleset
         .add_rules(landlock::path_beneath_rules(&["/dev/null"], access_rw))?
         .set_no_new_privs(true);
 
