@@ -365,15 +365,38 @@ fn file_system_sandbox_policies_match_semantics(
     derived: &FileSystemSandboxPolicy,
     sandbox_policy_cwd: &Path,
 ) -> bool {
+    use codex_utils_absolute_path::AbsolutePathBuf;
+
+    fn sorted_paths(mut paths: Vec<AbsolutePathBuf>) -> Vec<AbsolutePathBuf> {
+        paths.sort_by(|a, b| a.as_path().cmp(b.as_path()));
+        paths
+    }
+
+    fn sorted_writable_roots(
+        mut roots: Vec<codex_protocol::protocol::WritableRoot>,
+    ) -> Vec<codex_protocol::protocol::WritableRoot> {
+        for root in &mut roots {
+            root.read_only_subpaths
+                .sort_by(|a, b| a.as_path().cmp(b.as_path()));
+        }
+        roots.sort_by(|a, b| a.root.as_path().cmp(b.root.as_path()));
+        roots
+    }
+
+    // Policy equivalence is a set property; the round-trip through
+    // `to_legacy_sandbox_policy` / `from_legacy_sandbox_policy` may reorder
+    // entries (e.g. a protected `.codex` subpath appended during the
+    // `from_legacy_sandbox_policy` projection) without changing meaning, so
+    // compare the roots order-insensitively.
     provided.has_full_disk_read_access() == derived.has_full_disk_read_access()
         && provided.has_full_disk_write_access() == derived.has_full_disk_write_access()
         && provided.include_platform_defaults() == derived.include_platform_defaults()
-        && provided.get_readable_roots_with_cwd(sandbox_policy_cwd)
-            == derived.get_readable_roots_with_cwd(sandbox_policy_cwd)
-        && provided.get_writable_roots_with_cwd(sandbox_policy_cwd)
-            == derived.get_writable_roots_with_cwd(sandbox_policy_cwd)
-        && provided.get_unreadable_roots_with_cwd(sandbox_policy_cwd)
-            == derived.get_unreadable_roots_with_cwd(sandbox_policy_cwd)
+        && sorted_paths(provided.get_readable_roots_with_cwd(sandbox_policy_cwd))
+            == sorted_paths(derived.get_readable_roots_with_cwd(sandbox_policy_cwd))
+        && sorted_writable_roots(provided.get_writable_roots_with_cwd(sandbox_policy_cwd))
+            == sorted_writable_roots(derived.get_writable_roots_with_cwd(sandbox_policy_cwd))
+        && sorted_paths(provided.get_unreadable_roots_with_cwd(sandbox_policy_cwd))
+            == sorted_paths(derived.get_unreadable_roots_with_cwd(sandbox_policy_cwd))
 }
 
 fn ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec: bool, use_legacy_landlock: bool) {

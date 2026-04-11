@@ -909,14 +909,36 @@ impl FileSystemSandboxPolicy {
     }
 
     fn semantic_signature(&self, cwd: &Path) -> FileSystemSemanticSignature {
+        // Sort path lists so that policies differing only in iteration order of
+        // their entries compare equal. Equivalence is a set property, not a
+        // sequence one; without this, round-tripping a policy through
+        // `to_legacy_sandbox_policy` / `from_legacy_sandbox_policy` may reorder
+        // readable roots (e.g. a protected `.codex` subpath added during
+        // `from_legacy_sandbox_policy` appears at a different index) and trip
+        // `needs_direct_runtime_enforcement` even though the semantics are
+        // identical.
+        fn sort_paths(paths: &mut [AbsolutePathBuf]) {
+            paths.sort_by(|a, b| a.as_path().cmp(b.as_path()));
+        }
+        let mut readable_roots = self.get_readable_roots_with_cwd(cwd);
+        sort_paths(&mut readable_roots);
+        let mut writable_roots = self.get_writable_roots_with_cwd(cwd);
+        writable_roots.sort_by(|a, b| a.root.as_path().cmp(b.root.as_path()));
+        for writable in &mut writable_roots {
+            sort_paths(&mut writable.read_only_subpaths);
+        }
+        let mut unreadable_roots = self.get_unreadable_roots_with_cwd(cwd);
+        sort_paths(&mut unreadable_roots);
+        let mut unreadable_globs = self.get_unreadable_globs_with_cwd(cwd);
+        unreadable_globs.sort();
         FileSystemSemanticSignature {
             has_full_disk_read_access: self.has_full_disk_read_access(),
             has_full_disk_write_access: self.has_full_disk_write_access(),
             include_platform_defaults: self.include_platform_defaults(),
-            readable_roots: self.get_readable_roots_with_cwd(cwd),
-            writable_roots: self.get_writable_roots_with_cwd(cwd),
-            unreadable_roots: self.get_unreadable_roots_with_cwd(cwd),
-            unreadable_globs: self.get_unreadable_globs_with_cwd(cwd),
+            readable_roots,
+            writable_roots,
+            unreadable_roots,
+            unreadable_globs,
         }
     }
 }
@@ -1447,6 +1469,42 @@ mod tests {
     #[cfg(unix)]
     fn symlink_dir(original: &Path, link: &Path) -> std::io::Result<()> {
         std::os::unix::fs::symlink(original, link)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restricted_reads_do_not_require_direct_runtime_enforcement_under_nontmp_cwd() {
+        // Regression test: when the cwd is outside /tmp, the from_legacy_sandbox_policy
+        // pipeline adds a `.codex` protected subpath entry whose position in the
+        // entry list differs between the original and the round-tripped policy.
+        // That difference must not flip `needs_direct_runtime_enforcement`, because
+        // it would break the legacy Landlock enforcement path for restricted
+        // read-only access on WorkspaceWrite.
+        // TempDir defaults to /tmp, but the bug only manifests when the cwd is
+        // not under the default writable `/tmp` root, so anchor the fixture
+        // under /var/tmp instead.
+        let tmp = tempfile::Builder::new()
+            .prefix("codex-reg-")
+            .tempdir_in("/var/tmp")
+            .expect("tempdir under /var/tmp");
+        let workspace = tmp.path().to_path_buf();
+        let readable =
+            AbsolutePathBuf::from_absolute_path("/usr").expect("absolute /usr");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![],
+            read_only_access: ReadOnlyAccess::Restricted {
+                include_platform_defaults: true,
+                readable_roots: vec![readable],
+            },
+            network_access: false,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        let fsp = FileSystemSandboxPolicy::from_legacy_sandbox_policy(&policy, &workspace);
+        assert!(
+            !fsp.needs_direct_runtime_enforcement(NetworkSandboxPolicy::Restricted, &workspace),
+            "restricted-read WorkspaceWrite must remain lossless through the legacy round-trip"
+        );
     }
 
     #[test]
