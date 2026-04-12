@@ -21,6 +21,15 @@ pub(crate) const LINUX_PLATFORM_DEFAULT_READ_ROOTS: &[&str] = &[
     "/lib64",
     "/nix/store",
     "/run/current-system/sw",
+    // Language runtimes (CoreCLR/.NET, JVM, Python, Node, ...) routinely
+    // probe these pseudo-filesystems at startup: /proc for cpu/memory/maps,
+    // /sys for cgroup limits, and /dev for /dev/urandom (e.g. .NET's
+    // `Guid.NewGuid` raises a CryptographicException without it). Landlock
+    // treats them as ordinary filesystem paths, so they must be on the read
+    // allowlist or restricted-read sessions can't run any managed runtime.
+    "/proc",
+    "/sys",
+    "/dev",
 ];
 
 /// Return the subset of [`LINUX_PLATFORM_DEFAULT_READ_ROOTS`] that actually
