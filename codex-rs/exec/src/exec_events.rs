@@ -1,3 +1,4 @@
+use codex_app_server_protocol::HookRunSummary;
 use codex_protocol::models::WebSearchAction;
 use serde::Deserialize;
 use serde::Serialize;
@@ -31,6 +32,19 @@ pub enum ThreadEvent {
     /// Signals that an item has reached a terminal state—either success or failure.
     #[serde(rename = "item.completed")]
     ItemCompleted(ItemCompletedEvent),
+    /// Emitted right before a configured hook handler runs (PreToolUse,
+    /// Stop, SessionStart, etc). One `hook.started` is produced per
+    /// handler per trigger; the matching `hook.completed` follows when
+    /// the handler returns.
+    #[serde(rename = "hook.started")]
+    HookStarted(HookStartedEvent),
+    /// Emitted when a hook handler finishes. Carries the full
+    /// `HookRunSummary` — status, exit code, duration, stdout/stderr
+    /// entries — so downstream tooling can audit hook behavior
+    /// (whether a Stop hook blocked a turn end, which PreToolUse hook
+    /// denied a tool call, etc).
+    #[serde(rename = "hook.completed")]
+    HookCompleted(HookCompletedEvent),
     /// Represents an unrecoverable error emitted directly by the event stream.
     #[serde(rename = "error")]
     Error(ThreadErrorEvent),
@@ -86,6 +100,33 @@ pub struct ItemUpdatedEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub struct ThreadErrorEvent {
     pub message: String,
+}
+
+/// A hook handler has started executing.
+///
+/// `run` carries a snapshot of the handler's identity (event name, command,
+/// source path, etc) at start time; the corresponding `hook.completed`
+/// event will carry the same `id` with `status` / `exit_code` / `duration_ms`
+/// filled in.
+///
+/// Note: `run` is re-used from the app-server protocol which uses
+/// `camelCase` field names (`eventName`, `handlerType`, ...), while the
+/// rest of this enum uses `snake_case`. Downstream parsers that only
+/// care about event types (`"type": "hook.started"`) don't see this
+/// mix; audits that look inside `run` should be aware of it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+pub struct HookStartedEvent {
+    /// Turn this hook is associated with. `None` when the hook fires outside
+    /// a turn (e.g. `SessionStart`).
+    pub turn_id: Option<String>,
+    pub run: HookRunSummary,
+}
+
+/// A hook handler has finished executing. See [`HookStartedEvent`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+pub struct HookCompletedEvent {
+    pub turn_id: Option<String>,
+    pub run: HookRunSummary,
 }
 
 /// Canonical representation of a thread item and its domain-specific payload.

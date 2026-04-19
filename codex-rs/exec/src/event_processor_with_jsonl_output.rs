@@ -42,6 +42,8 @@ use crate::exec_events::McpToolCallStatus as ExecMcpToolCallStatus;
 use crate::exec_events::PatchApplyStatus as ExecPatchApplyStatus;
 use crate::exec_events::PatchChangeKind as ExecPatchChangeKind;
 use crate::exec_events::ReasoningItem;
+use crate::exec_events::HookCompletedEvent;
+use crate::exec_events::HookStartedEvent;
 use crate::exec_events::ThreadErrorEvent;
 use crate::exec_events::ThreadEvent;
 use crate::exec_events::ThreadItem as ExecThreadItem;
@@ -455,7 +457,18 @@ impl EventProcessorWithJsonOutput {
                 }));
                 CodexStatus::Running
             }
-            ServerNotification::HookStarted(_) | ServerNotification::HookCompleted(_) => {
+            ServerNotification::HookStarted(notification) => {
+                events.push(ThreadEvent::HookStarted(HookStartedEvent {
+                    turn_id: notification.turn_id,
+                    run: notification.run,
+                }));
+                CodexStatus::Running
+            }
+            ServerNotification::HookCompleted(notification) => {
+                events.push(ThreadEvent::HookCompleted(HookCompletedEvent {
+                    turn_id: notification.turn_id,
+                    run: notification.run,
+                }));
                 CodexStatus::Running
             }
             ServerNotification::ItemStarted(notification) => {
